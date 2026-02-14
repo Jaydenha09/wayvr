@@ -101,11 +101,16 @@ impl InputState {
                 hand.interaction.long_press_click_sent = false;
             }
 
+            let long_press_threshold = Duration::from_secs_f32(session.config.long_press_duration);
+            let is_long_press = hand
+                .click_press_start
+                .is_some_and(|start| start.elapsed() >= long_press_threshold);
+
             // Prevent the mode from changing during a click (except for long press)
-            if !hand.before.click || (session.config.long_press_to_right_click && hand.click_press_start.is_some_and(|start| start.elapsed() >= Duration::from_secs_f32(session.config.long_press_duration))) {
+            if !hand.before.click || is_long_press {
                 if hand.now.click_modifier_right {
                     hand.interaction.mode = PointerMode::Right;
-                } else if session.config.long_press_to_right_click && hand.click_press_start.is_some_and(|start| start.elapsed() >= Duration::from_secs_f32(session.config.long_press_duration)) {
+                } else if is_long_press {
                     hand.interaction.mode = PointerMode::Right;
                 } else if hand.now.click_modifier_middle {
                     hand.interaction.mode = PointerMode::Middle;
@@ -540,38 +545,18 @@ where
     let pointer = &mut app.input_state.pointers[hit.pointer];
 
     // Check if we should send a long-press click immediately
-    if app.session.config.long_press_to_right_click {
-        let long_press_threshold = Duration::from_secs_f32(app.session.config.long_press_duration);
-        let is_long_press = pointer
-            .click_press_start
-            .is_some_and(|start| start.elapsed() >= long_press_threshold);
+    let long_press_threshold = Duration::from_secs_f32(app.session.config.long_press_duration);
+    let is_long_press = pointer
+        .click_press_start
+        .is_some_and(|start| start.elapsed() >= long_press_threshold);
 
-        if is_long_press && pointer.now.click && !pointer.interaction.long_press_click_sent {
-            // Immediately send right-click (press + release)
-            pointer.interaction.long_press_click_sent = true;
-            let mut hit_right = hit;
-            hit_right.mode = PointerMode::Right;
-            hovered.config.backend.on_pointer(app, &hit_right, true);
-            hovered.config.backend.on_pointer(app, &hit_right, false);
-        } else if pointer.now.click && !pointer.before.click {
-            pointer.interaction.clicked_id = Some(hit.overlay);
-            update_focus(
-                &mut app.hid_provider.keyboard_focus,
-                hovered.config.keyboard_focus,
-            );
-            hovered.config.backend.on_pointer(app, &hit, true);
-        } else if !pointer.now.click && pointer.before.click {
-            // Only send release if we haven't already sent a long press click
-            if !pointer.interaction.long_press_click_sent {
-                if let Some(clicked_id) = pointer.interaction.clicked_id.take() {
-                    if let Some(clicked) = overlays.mut_by_id(clicked_id) {
-                        clicked.config.backend.on_pointer(app, &hit, false);
-                    }
-                } else {
-                    hovered.config.backend.on_pointer(app, &hit, false);
-                }
-            }
-        }
+    if is_long_press && pointer.now.click && !pointer.interaction.long_press_click_sent {
+        // Immediately send right-click (press + release)
+        pointer.interaction.long_press_click_sent = true;
+        let mut hit_right = hit;
+        hit_right.mode = PointerMode::Right;
+        hovered.config.backend.on_pointer(app, &hit_right, true);
+        hovered.config.backend.on_pointer(app, &hit_right, false);
     } else if pointer.now.click && !pointer.before.click {
         pointer.interaction.clicked_id = Some(hit.overlay);
         update_focus(
