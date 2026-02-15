@@ -43,6 +43,76 @@ pub struct MultiClickHandler<const COUNT: usize> {
     held_inactive: bool,
 }
 
+pub struct LongPressHandler {
+    name: String,
+    action_f32: xr::Action<f32>,
+    action_bool: xr::Action<bool>,
+    press_start: Option<Instant>,
+    activated: bool,
+}
+
+impl LongPressHandler {
+    fn new(action_set: &xr::ActionSet, action_name: &str, side: &str) -> anyhow::Result<Self> {
+        let name = format!("{side}_long-{action_name}");
+        let name_f32 = format!("{}_value", &name);
+
+        let action_bool = action_set.create_action::<bool>(&name, &name, &[])?;
+        let action_f32 = action_set.create_action::<f32>(&name_f32, &name_f32, &[])?;
+
+        Ok(Self {
+            name,
+            action_f32,
+            action_bool,
+            press_start: None,
+            activated: false,
+        })
+    }
+
+    fn check<G>(
+        &mut self,
+        session: &xr::Session<G>,
+        threshold: f32,
+        long_press_duration: f32,
+    ) -> anyhow::Result<bool> {
+        let res = self.action_bool.state(session, xr::Path::NULL)?;
+        let mut state = res.is_active && res.current_state;
+
+        if !state {
+            let res = self.action_f32.state(session, xr::Path::NULL)?;
+            state = res.is_active && res.current_state >= threshold - 0.001;
+        }
+
+        if !state {
+            // Button released, reset state
+            self.press_start = None;
+            self.activated = false;
+            return Ok(false);
+        }
+
+        // Button is pressed
+        if self.press_start.is_none() {
+            self.press_start = Some(Instant::now());
+            self.activated = false;
+        }
+
+        // Check if we've held long enough
+        if let Some(start) = self.press_start {
+            let elapsed = start.elapsed().as_secs_f32();
+            if elapsed >= long_press_duration && !self.activated {
+                log::trace!("{}: long press activated", self.name);
+                self.activated = true;
+                return Ok(true);
+            }
+        }
+
+        Ok(self.activated)
+    }
+
+    fn is_pending(&self) -> bool {
+        self.press_start.is_some() && !self.activated
+    }
+}
+
 impl<const COUNT: usize> MultiClickHandler<COUNT> {
     fn new(action_set: &xr::ActionSet, action_name: &str, side: &str) -> anyhow::Result<Self> {
         let name = format!("{side}_{COUNT}-{action_name}");
@@ -112,19 +182,19 @@ impl<const COUNT: usize> MultiClickHandler<COUNT> {
 pub struct CustomClickAction {
     single: MultiClickHandler<0>,
     double: MultiClickHandler<1>,
-    triple: MultiClickHandler<2>,
+    long_press: LongPressHandler,
 }
 
 impl CustomClickAction {
     pub fn new(action_set: &xr::ActionSet, name: &str, side: &str) -> anyhow::Result<Self> {
         let single = MultiClickHandler::new(action_set, name, side)?;
         let double = MultiClickHandler::new(action_set, name, side)?;
-        let triple = MultiClickHandler::new(action_set, name, side)?;
+        let long_press = LongPressHandler::new(action_set, name, side)?;
 
         Ok(Self {
             single,
             double,
-            triple,
+            long_press,
         })
     }
     pub fn state(
@@ -141,7 +211,7 @@ impl CustomClickAction {
 
         Ok(self.single.check(&state.session, threshold)?
             || self.double.check(&state.session, threshold)?
-            || self.triple.check(&state.session, threshold)?)
+            || self.long_press.check(&state.session, threshold, session.config.long_press_duration)?)
     }
 }
 
@@ -435,7 +505,14 @@ impl OpenXrPointer {
         xr: &XrState,
         session: &AppSession,
     ) -> anyhow::Result<()> {
-        pointer.now.click = self.source.click.state(pointer.before.click, xr, session)?;
+        let long_press_pending = self.source.modifier_right.long_press.is_pending()
+            || self.source.modifier_middle.long_press.is_pending();
+
+        pointer.now.click = if long_press_pending {
+            false
+        } else {
+            self.source.click.state(pointer.before.click, xr, session)?
+        };
 
         pointer.now.grab = self.source.grab.state(pointer.before.grab, xr, session)?;
 
@@ -574,9 +651,9 @@ macro_rules! add_custom {
                     for s in iter {
                         if let Some(p) = to_paths(Some(s.as_str()), $instance) {
                             if is_bool(s) {
-                                if action.triple_click.unwrap_or(false) {
+                                if action.long_press.unwrap_or(false) {
                                     $bindings.push(xr::Binding::new(
-                                        &$hands[i].$field.triple.action_bool,
+                                        &$hands[i].$field.long_press.action_bool,
                                         p,
                                     ));
                                 } else if action.double_click.unwrap_or(false) {
@@ -591,9 +668,9 @@ macro_rules! add_custom {
                                     ));
                                 }
                             } else {
-                                if action.triple_click.unwrap_or(false) {
+                                if action.long_press.unwrap_or(false) {
                                     $bindings.push(xr::Binding::new(
-                                        &$hands[i].$field.triple.action_f32,
+                                        &$hands[i].$field.long_press.action_f32,
                                         p,
                                     ));
                                 } else if action.double_click.unwrap_or(false) {
@@ -739,6 +816,7 @@ struct OpenXrActionConfAction {
     threshold: Option<[f32; 2]>,
     double_click: Option<bool>,
     triple_click: Option<bool>,
+    long_press: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

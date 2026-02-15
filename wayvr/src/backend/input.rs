@@ -91,29 +91,33 @@ impl InputState {
 
             if hand.now.click {
                 hand.last_click = Instant::now();
-
+                
                 if !hand.before.click {
                     hand.click_press_start = Some(Instant::now());
-                    hand.interaction.long_press_click_sent = false;
                 }
             } else {
                 hand.click_press_start = None;
-                hand.interaction.long_press_click_sent = false;
             }
 
+            // Check if click has been held long enough to trigger right-click mode
             let long_press_threshold = Duration::from_secs_f32(session.config.long_press_duration);
             let is_long_press = hand
                 .click_press_start
                 .is_some_and(|start| start.elapsed() >= long_press_threshold);
 
-            // Prevent the mode from changing during a click (except for long press)
-            if !hand.before.click || is_long_press {
+            // Allow mode changes on initial click, modifier activation, or long-press threshold (right-click fallback).
+            let modifier_just_activated = 
+                (!hand.before.click_modifier_right && hand.now.click_modifier_right) ||
+                (!hand.before.click_modifier_middle && hand.now.click_modifier_middle);
+
+            if !hand.before.click || modifier_just_activated || (is_long_press && hand.before.click) {
                 if hand.now.click_modifier_right {
-                    hand.interaction.mode = PointerMode::Right;
-                } else if is_long_press {
                     hand.interaction.mode = PointerMode::Right;
                 } else if hand.now.click_modifier_middle {
                     hand.interaction.mode = PointerMode::Middle;
+                } else if is_long_press {
+                    // Auto right-click on long press if no modifier is active
+                    hand.interaction.mode = PointerMode::Right;
                 } else if !hand.before.click {
                     let hmd_up = self.hmd.transform_vector3a(Vec3A::Y);
                     let dot = hmd_up.dot(hand.pose.transform_vector3a(Vec3A::X))
@@ -541,39 +545,56 @@ where
 
     handle_scroll(&hit, hovered, app);
 
-    // click / release - normal behavior
+    // click / release
     let pointer = &mut app.input_state.pointers[hit.pointer];
 
-    // Check if we should send a long-press click immediately
-    let long_press_threshold = Duration::from_secs_f32(app.session.config.long_press_duration);
-    let is_long_press = pointer
-        .click_press_start
-        .is_some_and(|start| start.elapsed() >= long_press_threshold);
+    // Check if mode changed during an active click
+    let mode_changed = pointer.now.click && pointer.before.click 
+        && pointer.interaction.click_mode != pointer.interaction.mode;
 
-    if is_long_press && pointer.now.click && !pointer.interaction.long_press_click_sent {
-        // Immediately send right-click (press + release)
-        pointer.interaction.long_press_click_sent = true;
-        let mut hit_right = hit;
-        hit_right.mode = PointerMode::Right;
-        hovered.config.backend.on_pointer(app, &hit_right, true);
-        hovered.config.backend.on_pointer(app, &hit_right, false);
-    } else if pointer.now.click && !pointer.before.click {
+    if pointer.now.click && !pointer.before.click {
+        // Click just started
         pointer.interaction.clicked_id = Some(hit.overlay);
+        pointer.interaction.click_mode = pointer.interaction.mode;
+        // Ensure hit has the correct mode
+        hit.mode = pointer.interaction.mode;
         update_focus(
             &mut app.hid_provider.keyboard_focus,
             hovered.config.keyboard_focus,
         );
         hovered.config.backend.on_pointer(app, &hit, true);
-    } else if !pointer.now.click && pointer.before.click {
-        // Only send release if we haven't already sent a long press click
-        if !pointer.interaction.long_press_click_sent {
-            if let Some(clicked_id) = pointer.interaction.clicked_id.take() {
-                if let Some(clicked) = overlays.mut_by_id(clicked_id) {
-                    clicked.config.backend.on_pointer(app, &hit, false);
-                }
-            } else {
-                hovered.config.backend.on_pointer(app, &hit, false);
+    } else if mode_changed {
+        // Mode changed during click - send release with old mode, then press with new mode
+        let mut old_hit = hit;
+        old_hit.mode = pointer.interaction.click_mode;
+        
+        // Send release with old mode
+        if let Some(clicked_id) = pointer.interaction.clicked_id {
+            if let Some(clicked) = overlays.mut_by_id(clicked_id) {
+                clicked.config.backend.on_pointer(app, &old_hit, false);
             }
+        }
+        
+        // Update to new mode and send press
+        let pointer = &mut app.input_state.pointers[hit.pointer];
+        pointer.interaction.click_mode = pointer.interaction.mode;
+        pointer.interaction.clicked_id = Some(hit.overlay);
+        
+        // Ensure hit has the new mode
+        hit.mode = pointer.interaction.mode;
+        
+        if let Some(hovered) = overlays.mut_by_id(hit.overlay) {
+            // Send press with new mode
+            hovered.config.backend.on_pointer(app, &hit, true);
+        }
+    } else if !pointer.now.click && pointer.before.click {
+        // Click released
+        if let Some(clicked_id) = pointer.interaction.clicked_id.take() {
+            if let Some(clicked) = overlays.mut_by_id(clicked_id) {
+                clicked.config.backend.on_pointer(app, &hit, false);
+            }
+        } else {
+            hovered.config.backend.on_pointer(app, &hit, false);
         }
     }
 
@@ -605,7 +626,6 @@ fn handle_no_hit<O>(
     // send release event to overlay that was originally clicked
     if !pointer.now.click
         && pointer.before.click
-        && !pointer.interaction.long_press_click_sent
         && let Some(clicked_id) = pointer.interaction.clicked_id.take()
     {
         let hit = PointerHit {

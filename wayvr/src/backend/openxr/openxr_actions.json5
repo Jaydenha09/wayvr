@@ -32,6 +32,16 @@
 //
 // -- pose, haptic --
 // do not mess with these, unless you know what you're doing
+//
+// Binding modifiers (optional):
+// - double_click: true    - require double-clicking the binding
+// - long_press: true      - activate after holding the binding for long_press_duration (config)
+//
+// Example usage:
+//   click_modifier_right: {
+//     long_press: true,
+//     left: "/user/hand/left/input/trigger/value"
+//   }
 
 [
   // Eye+hand interaction
